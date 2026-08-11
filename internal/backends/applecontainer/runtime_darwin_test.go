@@ -279,6 +279,40 @@ func TestAppleContainerRuntimeCreateSandboxBuildsConfigAndStartsEnvd(t *testing.
 	}
 }
 
+func TestAppleGuestEnvdURLUsesContainerIPv4(t *testing.T) {
+	snapshot := ContainerSnapshot{Networks: []map[string]any{{"ipv4Address": "192.168.64.2/24"}}}
+	if got := appleGuestEnvdURL(snapshot, 49983); got != "http://192.168.64.2:49983" {
+		t.Fatalf("unexpected guest envd URL %q", got)
+	}
+}
+
+func TestAppleContainerRuntimeWaitHealthyEnvdFallsBackToGuestIPv4(t *testing.T) {
+	client := &fakeAppleClient{snapshots: []ContainerSnapshot{{
+		Configuration: ContainerConfiguration{ID: "sandbox"},
+		Networks:      []map[string]any{{"ipv4Address": "192.168.64.2/24"}},
+	}}}
+	runtime := newTestAppleRuntime(writeTestAppleEnvdBinary(t), client)
+	var checked []string
+	runtime.checkHealthy = func(ctx context.Context, envdURL string) error {
+		checked = append(checked, envdURL)
+		if envdURL == "http://127.0.0.1:55321" {
+			return errors.New("published port reset")
+		}
+		return nil
+	}
+
+	got, err := runtime.waitHealthyEnvd(context.Background(), "sandbox", "55321", "")
+	if err != nil {
+		t.Fatalf("waitHealthyEnvd returned error: %v", err)
+	}
+	if got != "http://192.168.64.2:49983" {
+		t.Fatalf("unexpected fallback envd URL %q", got)
+	}
+	if !reflect.DeepEqual(checked, []string{"http://127.0.0.1:55321", "http://192.168.64.2:49983"}) {
+		t.Fatalf("unexpected health checks %#v", checked)
+	}
+}
+
 func TestAppleContainerRuntimeCreateSandboxCleansUpAfterHealthFailure(t *testing.T) {
 	envdPath := writeTestAppleEnvdBinary(t)
 	client := &fakeAppleClient{image: testImageDescription()}

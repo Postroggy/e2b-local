@@ -152,10 +152,13 @@ func NewDockerRuntime(cfg DockerRuntimeConfig, logger *log.Logger) (*DockerRunti
 	if !dockerHostSupportsLocalBindMounts(cfg.Host) {
 		return nil, fmt.Errorf("docker bind-backed volumes require a local Docker daemon; got docker.host %q", cfg.Host)
 	}
-	cli, err := client.NewClientWithOpts(
-		client.WithHost(cfg.Host),
-		client.WithAPIVersionNegotiation(),
-	)
+	clientOptions := []client.Opt{client.WithHost(cfg.Host)}
+	if version := strings.TrimSpace(cfg.APIVersion); version != "" {
+		clientOptions = append(clientOptions, client.WithVersion(version))
+	} else {
+		clientOptions = append(clientOptions, client.WithAPIVersionNegotiation())
+	}
+	cli, err := client.NewClientWithOpts(clientOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("create docker client: %w", err)
 	}

@@ -1,0 +1,34 @@
+server:
+  addr: "127.0.0.1:3000"
+
+runtime:
+  type: "sbx"
+
+sbx:
+  sandboxd_socket: "~/.sbx/run/d/sandboxd.sock"
+  docker_socket: "~/.sbx/run/d/docker.sock"
+  docker_api_version: "1.51"
+  metrics_root: "~/Library/Application Support/com.docker.sandboxes/sandboxes/sandboxd/containerd/state/io.containerd.runtime.v2.task/docker"
+  container_name_prefix: "e2b-sbx-"
+  default_image: "e2b-local/sbx-envd:dev"
+  agent: "shell"
+  workspace: "/tmp"
+  require_login: true
+  allow_degraded: false
+  login_hint: "sbx login"
+  cert_hint: "SSL_CERT_FILE=$HOME/.sbx/duguanjia-live.pem sbx login"
+  envd_port: 49983
+  health_timeout_seconds: 60
+  tunnel_bind_host: "0.0.0.0"
+  # Leave empty to detect the host address reachable from the microVM.
+  tunnel_host: ""
+  tunnel_public_host: "127.0.0.1"
+  tunnel_port_range: [40000, 41000]
+  tunnel_connections: 8
+  published_ports: []
+  volume_host_path: "~/.e2b-local/volumes/sbx"
+  templates:
+    sbx:
+      image: "e2b-local/sbx-envd:dev"
+      memory: "2GB"
+      cpus: 2

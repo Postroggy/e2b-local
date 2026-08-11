@@ -7,8 +7,9 @@
 - Docker containers through the Docker Engine API
 - OrbStack Linux VMs through the OrbStack CLI
 - Apple Container through its native XPC services on macOS
+- Docker Sandboxes (SBX) microVMs through local `sbx` and `sandboxd` services
 
-The HTTP layer follows the E2B OpenAPI schema where practical, while runtime-specific work lives behind Docker, OrbStack, and Apple Container backend packages.
+The HTTP layer follows the E2B OpenAPI schema where practical, while runtime-specific work lives behind Docker, OrbStack, Apple Container, and SBX backend packages.
 
 ## Quick Start
 
@@ -54,6 +55,7 @@ flowchart LR
     Registry --> Docker["Docker runtime<br/>internal/backends/docker"]
     Registry --> OrbStack["OrbStack runtime<br/>internal/backends/orbstack"]
     Registry --> AppleContainer["Apple Container runtime<br/>internal/backends/applecontainer"]
+    Registry --> SBX["SBX runtime<br/>internal/backends/sbx"]
   end
 
   subgraph DockerRuntime["Docker"]
@@ -71,6 +73,12 @@ flowchart LR
     AppleContainer --> AppleVolumes["Apple Container named volumes"]
   end
 
+  subgraph SBXRuntime["Docker Sandboxes"]
+    SBX --> Sandboxd["local sandboxd UDS"]
+    Sandboxd --> MicroVMs["Sandbox microVMs"]
+    SBX --> SBXVolumes["Host volume directories<br/>sbx.volume_host_path"]
+  end
+
   EnvdBin["envd-bin<br/>linux amd64 / arm64"] --> Docker
   EnvdBin --> OrbStack
   EnvdBin --> AppleContainer
@@ -78,6 +86,7 @@ flowchart LR
   VMs --> VMEnvd["envd systemd service"]
   ContainerEnvd -. "direct envdURL" .-> SDK
   VMEnvd -. "direct envdURL" .-> SDK
+  MicroVMs -. "reverse-tunnel envdURL" .-> SDK
 ```
 
 The gateway handles E2B-compatible control-plane APIs such as sandbox lifecycle, templates, volumes, snapshots, metrics, and logs. After a sandbox is created, SDK calls for commands, filesystem, PTY, and streaming use the sandbox-specific `envdURL` returned by the runtime.
@@ -220,7 +229,7 @@ Docker inspects the selected image architecture and bind-mounts the matching `en
 
 ## Configuration
 
-See `config.example.yaml` for the full local config shape. Use `config.docker.yaml` for a Docker-focused example, `config.orb.yaml` for an OrbStack-focused example, and `config.applecontainer.yaml` for an Apple Container example.
+See `config.example.yaml` for the full local config shape. Use `config.docker.yaml` for a Docker-focused example, `config.orb.yaml` for an OrbStack-focused example, `config.applecontainer.yaml` for an Apple Container example, and `config.sbx.yaml` for Docker Sandboxes.
 
 A compact Docker config:
 
@@ -250,7 +259,7 @@ docker:
 
 Important fields:
 
-- `runtime.type` supports `docker`, `orbstack`, and `applecontainer`.
+- `runtime.type` supports `docker`, `orbstack`, `applecontainer`, and `sbx`.
 - `docker.host` can be omitted. The gateway uses `DOCKER_HOST`, then the current user's OrbStack socket when present, then `unix:///var/run/docker.sock`.
 - Docker templates are discovered from tagged local Docker images. The gateway never pulls images; pull, build, and tag them locally before creating sandboxes.
 - `traffic.advertised_host` is the IP or host returned by sandbox port lookups. Empty means the gateway detects it on startup. `traffic.interface` can force a host interface such as `en0`; otherwise macOS falls back to UDP probing, while Linux tries netlink route detection before UDP probing.
@@ -361,6 +370,31 @@ Example sandbox request:
 }
 ```
 
+## Docker Sandboxes (SBX) Runtime
+
+SBX uses the locally installed Docker Sandboxes control plane, not a checked-in
+copy of `e2b-infra`. Build the only required image from current public source:
+
+```bash
+scripts/build-sbx-image.sh
+go run ./cmd/e2b-local --config config.sbx.yaml
+```
+
+The build resolves the current public `e2b-dev/infra` revision, sparse-checks
+out only `packages/envd` and `packages/shared`, and compiles `envd`. The final
+image contains only `envd`, `sbx-init`, and `sbx-tunnel`; it contains neither
+the upstream source tree nor an `e2b-infra` runtime dependency.
+
+By default the backend requires `sbx login` and uses authenticated `sandboxd`
+for lifecycle operations. Set `allow_degraded: true` only for an explicit local
+Docker fallback when login is intentionally unavailable.
+
+SBX supports create/pause/resume/delete, restart recovery, volumes, logs,
+metrics, Docker-hijacked PTY, and a reverse tunnel for the guest `envd` URL.
+Snapshots are deliberately unsupported: current Docker Sandboxes does not
+provide a usable image commit/export path, and the gateway returns `501` rather
+than pretending that a partial fallback is a snapshot.
+
 ## OrbStack Runtime
 
 Use OrbStack runtime when each sandbox should run inside a full Linux VM:
@@ -424,8 +458,8 @@ Notes:
 - A default kernel is required. If `container run` reports `default kernel not configured`, run `container system kernel set --recommended`.
 - Template images must already be pulled with Apple Container. Lifecycle-only smoke tests can use small images such as Alpine, but E2B SDK command execution needs an image with `/bin/bash`; `debian:bookworm-slim` works.
 - envd is copied from `applecontainer.envd_binary` unless the selected template sets `prebaked_envd_path`.
-- envd is exposed with an explicit published localhost port because Apple Container does not allocate `hostPort: 0`; the runtime retries with a fresh port when Apple Container reports a port conflict.
-- `pause` maps to Apple Container stop, and `resume` bootstraps the existing container and reuses the persisted published port.
+- envd receives an explicit published localhost port because Apple Container does not allocate `hostPort: 0`; the runtime retries with a fresh port when Apple Container reports a port conflict. If that local port proxy is unavailable, the runtime returns the reachable guest IPv4 URL instead.
+- `pause` maps to Apple Container stop, and `resume` bootstraps the existing container and reuses the persisted published port. A guest-IP `envdURL` can change across stop/start and the resume response carries the updated URL.
 - Volumes use Apple Container named volumes and are mounted with the requested `VolumeMounts` during sandbox creation.
 
 Capability matrix:

@@ -395,6 +395,66 @@ applecontainer:
 	}
 }
 
+func TestLoadConfigReadsSbxRuntime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte(`
+runtime:
+  type: "sbx"
+
+sbx:
+  sandboxd_socket: "runtime/sandboxd.sock"
+  docker_socket: "runtime/docker.sock"
+  docker_api_version: "1.51"
+  metrics_root: "runtime/metrics"
+  container_name_prefix: "e2b-sbx-"
+  default_image: "e2b-local/sbx-envd:test"
+  agent: "shell"
+  workspace: "/tmp"
+  require_login: true
+  allow_degraded: true
+  login_hint: "sbx login"
+  envd_port: 49983
+  health_timeout_seconds: 60
+  tunnel_bind_host: "0.0.0.0"
+  tunnel_public_host: "127.0.0.1"
+  tunnel_port_range: [40000, 40010]
+  tunnel_connections: 2
+  volume_host_path: "volumes"
+  templates:
+    sbx:
+      image: "e2b-local/sbx-envd:test"
+      memory: "2GB"
+      cpus: 2
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load sbx config: %v", err)
+	}
+	if cfg.Runtime.Type != "sbx" {
+		t.Fatalf("expected sbx runtime, got %q", cfg.Runtime.Type)
+	}
+	if !cfg.Sbx.RequireLogin || !cfg.Sbx.AllowDegraded {
+		t.Fatalf("unexpected sbx login settings: %#v", cfg.Sbx)
+	}
+	if want := filepath.Join(dir, "runtime", "sandboxd.sock"); cfg.Sbx.SandboxdSocket != want {
+		t.Fatalf("expected sandboxd socket %q, got %q", want, cfg.Sbx.SandboxdSocket)
+	}
+	if want := filepath.Join(dir, "runtime", "docker.sock"); cfg.Sbx.DockerSocket != want {
+		t.Fatalf("expected docker socket %q, got %q", want, cfg.Sbx.DockerSocket)
+	}
+	if want := filepath.Join(dir, "runtime", "metrics"); cfg.Sbx.MetricsRoot != want {
+		t.Fatalf("expected metrics root %q, got %q", want, cfg.Sbx.MetricsRoot)
+	}
+	if want := filepath.Join(dir, "volumes"); cfg.Sbx.VolumeHostPath != want {
+		t.Fatalf("expected sbx volume path %q, got %q", want, cfg.Sbx.VolumeHostPath)
+	}
+}
+
 func TestAppleContainerRuntimeConfigValidate(t *testing.T) {
 	validConfig := func() AppleContainerRuntimeConfig {
 		return AppleContainerRuntimeConfig{

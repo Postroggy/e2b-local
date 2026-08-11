@@ -36,6 +36,16 @@ const (
 	defaultAppleContainerHealthTimeout = 60
 	defaultAppleContainerCPUs          = 4
 	defaultAppleContainerMemoryMB      = 1024
+	defaultSbxContainerNamePrefix      = "e2b-sbx-"
+	defaultSbxImage                    = "e2b-local/sbx-envd:dev"
+	defaultSbxAgent                    = "shell"
+	defaultSbxWorkspace                = "/tmp"
+	defaultSbxEnvdPort                 = 49983
+	defaultSbxHealthTimeout            = 60
+	defaultSbxTunnelBindHost           = "0.0.0.0"
+	defaultSbxTunnelPublicHost         = "127.0.0.1"
+	defaultSbxTunnelConnections        = 8
+	defaultSbxDockerAPIVersion         = "1.51"
 	defaultTemplateBuildMaxConcurrent  = 2
 	defaultTrafficProbeAddr            = "8.8.8.8:80"
 )
@@ -49,6 +59,7 @@ type Config struct {
 	Docker         DockerRuntimeConfig         `yaml:"docker"`
 	Orbstack       OrbstackRuntimeConfig       `yaml:"orbstack"`
 	AppleContainer AppleContainerRuntimeConfig `yaml:"applecontainer"`
+	Sbx            SbxRuntimeConfig            `yaml:"sbx"`
 	TemplateBuilds TemplateBuildConfig         `yaml:"template_builds"`
 }
 
@@ -72,6 +83,7 @@ type TemplateBuildConfig struct {
 
 type DockerRuntimeConfig struct {
 	Host                 string `yaml:"host"`
+	APIVersion           string `yaml:"api_version"`
 	Platform             string `yaml:"platform"`
 	ContainerNamePrefix  string `yaml:"container_name_prefix"`
 	EnvdBinary           string `yaml:"envd_binary"`
@@ -122,6 +134,42 @@ type AppleContainerTemplateConfig struct {
 	PrebakedEnvdPath string `yaml:"prebaked_envd_path"`
 }
 
+// SbxRuntimeConfig configures Docker Sandboxes' local microVM runtime. The
+// sandboxd socket is the authenticated lifecycle control plane; docker.sock
+// remains available for PTY, metrics discovery, and the explicit degraded
+// path.
+type SbxRuntimeConfig struct {
+	SandboxdSocket       string                       `yaml:"sandboxd_socket"`
+	DockerSocket         string                       `yaml:"docker_socket"`
+	DockerAPIVersion     string                       `yaml:"docker_api_version"`
+	MetricsRoot          string                       `yaml:"metrics_root"`
+	ContainerNamePrefix  string                       `yaml:"container_name_prefix"`
+	DefaultImage         string                       `yaml:"default_image"`
+	Agent                string                       `yaml:"agent"`
+	Workspace            string                       `yaml:"workspace"`
+	RequireLogin         bool                         `yaml:"require_login"`
+	AllowDegraded        bool                         `yaml:"allow_degraded"`
+	LoginHint            string                       `yaml:"login_hint"`
+	CertHint             string                       `yaml:"cert_hint"`
+	EnvdPort             int                          `yaml:"envd_port"`
+	HealthTimeoutSeconds int                          `yaml:"health_timeout_seconds"`
+	TunnelBindHost       string                       `yaml:"tunnel_bind_host"`
+	TunnelHost           string                       `yaml:"tunnel_host"`
+	TunnelPublicHost     string                       `yaml:"tunnel_public_host"`
+	TunnelPortRange      []int                        `yaml:"tunnel_port_range"`
+	TunnelConnections    int                          `yaml:"tunnel_connections"`
+	PublishedPorts       []int                        `yaml:"published_ports"`
+	VolumeHostPath       string                       `yaml:"volume_host_path"`
+	Templates            map[string]SbxTemplateConfig `yaml:"templates"`
+}
+
+type SbxTemplateConfig struct {
+	Image    string `yaml:"image"`
+	Memory   string `yaml:"memory"`
+	CPUs     int    `yaml:"cpus"`
+	StartCmd string `yaml:"start_cmd"`
+}
+
 func DefaultConfig() Config {
 	return Config{
 		Server: ServerConfig{
@@ -159,10 +207,49 @@ func DefaultConfig() Config {
 			DefaultCPUs:          defaultAppleContainerCPUs,
 			DefaultMemoryMB:      defaultAppleContainerMemoryMB,
 		},
+		Sbx: SbxRuntimeConfig{
+			SandboxdSocket:       defaultSbxSocket("sandboxd.sock"),
+			DockerSocket:         defaultSbxSocket("docker.sock"),
+			DockerAPIVersion:     defaultSbxDockerAPIVersion,
+			MetricsRoot:          defaultSbxMetricsRoot(),
+			ContainerNamePrefix:  defaultSbxContainerNamePrefix,
+			DefaultImage:         defaultSbxImage,
+			Agent:                defaultSbxAgent,
+			Workspace:            defaultSbxWorkspace,
+			RequireLogin:         true,
+			LoginHint:            "sbx login",
+			CertHint:             "SSL_CERT_FILE=$HOME/.sbx/duguanjia-live.pem sbx login",
+			EnvdPort:             defaultSbxEnvdPort,
+			HealthTimeoutSeconds: defaultSbxHealthTimeout,
+			TunnelBindHost:       defaultSbxTunnelBindHost,
+			TunnelPublicHost:     defaultSbxTunnelPublicHost,
+			TunnelPortRange:      []int{40000, 41000},
+			TunnelConnections:    defaultSbxTunnelConnections,
+			VolumeHostPath:       filepath.Join(defaultVolumeHostPath(), "sbx"),
+			Templates: map[string]SbxTemplateConfig{
+				"sbx": {Image: defaultSbxImage},
+			},
+		},
 		TemplateBuilds: TemplateBuildConfig{
 			MaxConcurrent: defaultTemplateBuildMaxConcurrent,
 		},
 	}
+}
+
+func defaultSbxSocket(name string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return filepath.Join(".sbx", "run", "d", name)
+	}
+	return filepath.Join(home, ".sbx", "run", "d", name)
+}
+
+func defaultSbxMetricsRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, "Library", "Application Support", "com.docker.sandboxes", "sandboxes", "sandboxd", "containerd", "state", "io.containerd.runtime.v2.task", "docker")
 }
 
 func defaultDockerHost() string {
@@ -260,6 +347,10 @@ func (c *Config) ResolveLocalPaths(baseDir string) {
 	c.Orbstack.EnvdBinary = resolveLocalPath(baseDir, c.Orbstack.EnvdBinary)
 	c.Orbstack.VolumeHostPath = resolveLocalPath(baseDir, c.Orbstack.VolumeHostPath)
 	c.AppleContainer.EnvdBinary = resolveLocalPath(baseDir, c.AppleContainer.EnvdBinary)
+	c.Sbx.SandboxdSocket = resolveLocalPath(baseDir, c.Sbx.SandboxdSocket)
+	c.Sbx.DockerSocket = resolveLocalPath(baseDir, c.Sbx.DockerSocket)
+	c.Sbx.MetricsRoot = resolveLocalPath(baseDir, c.Sbx.MetricsRoot)
+	c.Sbx.VolumeHostPath = resolveLocalPath(baseDir, c.Sbx.VolumeHostPath)
 }
 
 func resolveLocalPath(baseDir string, value string) string {
@@ -318,8 +409,9 @@ func (c Config) Validate() error {
 	case "docker":
 	case "orbstack":
 	case "applecontainer":
+	case "sbx":
 	default:
-		return fmt.Errorf("runtime.type must be docker, orbstack, or applecontainer")
+		return fmt.Errorf("runtime.type must be docker, orbstack, applecontainer, or sbx")
 	}
 
 	if c.Runtime.Type == "docker" {
@@ -338,7 +430,79 @@ func (c Config) Validate() error {
 			return err
 		}
 	}
+	if c.Runtime.Type == "sbx" {
+		if err := c.Sbx.Validate(); err != nil {
+			return err
+		}
+	}
 
+	return nil
+}
+
+func (c SbxRuntimeConfig) Validate() error {
+	if strings.TrimSpace(c.SandboxdSocket) == "" {
+		return fmt.Errorf("sbx.sandboxd_socket is required")
+	}
+	if strings.TrimSpace(c.DockerSocket) == "" {
+		return fmt.Errorf("sbx.docker_socket is required")
+	}
+	if strings.TrimSpace(c.DockerAPIVersion) == "" {
+		return fmt.Errorf("sbx.docker_api_version is required")
+	}
+	if strings.TrimSpace(c.ContainerNamePrefix) == "" {
+		return fmt.Errorf("sbx.container_name_prefix is required")
+	}
+	if strings.TrimSpace(c.DefaultImage) == "" {
+		return fmt.Errorf("sbx.default_image is required")
+	}
+	if strings.TrimSpace(c.Agent) == "" {
+		return fmt.Errorf("sbx.agent is required")
+	}
+	if !path.IsAbs(c.Workspace) {
+		return fmt.Errorf("sbx.workspace must be absolute")
+	}
+	if strings.TrimSpace(c.LoginHint) == "" {
+		return fmt.Errorf("sbx.login_hint is required")
+	}
+	if c.EnvdPort <= 0 || c.EnvdPort > 65535 {
+		return fmt.Errorf("sbx.envd_port must be between 1 and 65535")
+	}
+	if c.HealthTimeoutSeconds <= 0 {
+		return fmt.Errorf("sbx.health_timeout_seconds must be positive")
+	}
+	if ip := net.ParseIP(strings.TrimSpace(c.TunnelBindHost)); ip == nil || ip.IsLoopback() {
+		return fmt.Errorf("sbx.tunnel_bind_host must be a non-loopback IP address")
+	}
+	if strings.TrimSpace(c.TunnelPublicHost) == "" {
+		return fmt.Errorf("sbx.tunnel_public_host is required")
+	}
+	if c.TunnelConnections <= 0 {
+		return fmt.Errorf("sbx.tunnel_connections must be positive")
+	}
+	if len(c.TunnelPortRange) != 0 {
+		if len(c.TunnelPortRange) != 2 || c.TunnelPortRange[0] <= 0 || c.TunnelPortRange[1] > 65535 || c.TunnelPortRange[0] > c.TunnelPortRange[1] {
+			return fmt.Errorf("sbx.tunnel_port_range must contain an ascending [start, end] port range")
+		}
+	}
+	for _, port := range c.PublishedPorts {
+		if port <= 0 || port > 65535 || port == c.EnvdPort {
+			return fmt.Errorf("sbx.published_ports values must be between 1 and 65535 and must not include sbx.envd_port")
+		}
+	}
+	if strings.TrimSpace(c.VolumeHostPath) == "" || !filepath.IsAbs(c.VolumeHostPath) {
+		return fmt.Errorf("sbx.volume_host_path must be an absolute path")
+	}
+	for templateID, template := range c.Templates {
+		if strings.TrimSpace(templateID) == "" {
+			return fmt.Errorf("sbx.templates keys must not be empty")
+		}
+		if strings.TrimSpace(template.Image) == "" {
+			return fmt.Errorf("sbx.templates.%s.image is required", templateID)
+		}
+		if template.CPUs < 0 {
+			return fmt.Errorf("sbx.templates.%s.cpus must not be negative", templateID)
+		}
+	}
 	return nil
 }
 

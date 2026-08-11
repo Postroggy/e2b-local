@@ -74,8 +74,8 @@ func TestAppleContainerRuntimeCreatePauseResumeDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume apple container sandbox: %v", err)
 	}
-	if resumed.HostPort != info.HostPort || resumed.EnvdURL != info.EnvdURL {
-		t.Fatalf("expected resume to reuse host port, before=%#v after=%#v", info, resumed)
+	if resumed.HostPort != info.HostPort || resumed.EnvdURL == "" {
+		t.Fatalf("expected resume to preserve host port and return an envd URL, before=%#v after=%#v", info, resumed)
 	}
 
 	if err := runtime.DeleteSandbox(ctx, resumed); err != nil {

@@ -272,8 +272,8 @@ func TestDockerRuntimeGatewayCreatePauseConnectDelete(t *testing.T) {
 
 	app.ServeHTTP(pauseRec, pauseReq)
 
-	if pauseRec.Code != http.StatusOK {
-		t.Fatalf("expected pause status %d, got %d: %s", http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+	if pauseRec.Code != http.StatusNoContent {
+		t.Fatalf("expected pause status %d, got %d: %s", http.StatusNoContent, pauseRec.Code, pauseRec.Body.String())
 	}
 
 	inspect, err = runtime.client.ContainerInspect(ctx, containerName)
@@ -291,8 +291,8 @@ func TestDockerRuntimeGatewayCreatePauseConnectDelete(t *testing.T) {
 
 	app.ServeHTTP(connectRec, connectReq)
 
-	if connectRec.Code != http.StatusOK {
-		t.Fatalf("expected connect status %d, got %d: %s", http.StatusOK, connectRec.Code, connectRec.Body.String())
+	if connectRec.Code != http.StatusCreated {
+		t.Fatalf("expected connect status %d, got %d: %s", http.StatusCreated, connectRec.Code, connectRec.Body.String())
 	}
 
 	inspect, err = runtime.client.ContainerInspect(ctx, containerName)

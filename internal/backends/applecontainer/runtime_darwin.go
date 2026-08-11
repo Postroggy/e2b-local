@@ -256,8 +256,8 @@ func (r *AppleContainerRuntime) CreateSandbox(ctx context.Context, req gateway.S
 			return gateway.SandboxRuntimeInfo{}, err
 		}
 
-		envdURL := appleEnvdURL(strconv.Itoa(hostPort))
-		if err := r.healthCheck(ctx, envdURL); err != nil {
+		envdURL, err := r.waitHealthyEnvd(ctx, containerID, strconv.Itoa(hostPort), "")
+		if err != nil {
 			cleanup()
 			return gateway.SandboxRuntimeInfo{}, fmt.Errorf("envd health check: %w", err)
 		}
@@ -373,9 +373,11 @@ func (r *AppleContainerRuntime) ResumeSandbox(ctx context.Context, info gateway.
 		if info.EnvdURL == "" {
 			info.EnvdURL = appleEnvdURL(hostPort)
 		}
-		if err := r.healthCheck(ctx, info.EnvdURL); err != nil {
+		envdURL, err := r.waitHealthyEnvd(ctx, containerID, hostPort, info.EnvdURL)
+		if err != nil {
 			return gateway.SandboxRuntimeInfo{}, fmt.Errorf("envd health check: %w", err)
 		}
+		info.EnvdURL = envdURL
 		return info, nil
 	}
 
@@ -394,8 +396,8 @@ func (r *AppleContainerRuntime) ResumeSandbox(ctx context.Context, info gateway.
 		return gateway.SandboxRuntimeInfo{}, err
 	}
 
-	envdURL := appleEnvdURL(hostPort)
-	if err := r.healthCheck(ctx, envdURL); err != nil {
+	envdURL, err := r.waitHealthyEnvd(ctx, containerID, hostPort, info.EnvdURL)
+	if err != nil {
 		return gateway.SandboxRuntimeInfo{}, fmt.Errorf("envd health check: %w", err)
 	}
 
@@ -1065,6 +1067,23 @@ func appleEnvdURL(hostPort string) string {
 	return "http://" + net.JoinHostPort(appleEnvdHost, hostPort)
 }
 
+func appleGuestEnvdURL(snapshot ContainerSnapshot, envdPort int) string {
+	for _, network := range snapshot.Networks {
+		value, ok := network["ipv4Address"].(string)
+		if !ok {
+			continue
+		}
+		address := strings.TrimSpace(value)
+		if ip, _, err := net.ParseCIDR(address); err == nil && ip.To4() != nil {
+			return "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(envdPort))
+		}
+		if ip := net.ParseIP(address); ip != nil && ip.To4() != nil {
+			return "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(envdPort))
+		}
+	}
+	return ""
+}
+
 func (r *AppleContainerRuntime) runtimeInfoFromSnapshot(snapshot ContainerSnapshot, info gateway.SandboxRuntimeInfo) gateway.SandboxRuntimeInfo {
 	labels := snapshot.Configuration.Labels
 	if info.SandboxID == "" {
@@ -1082,8 +1101,11 @@ func (r *AppleContainerRuntime) runtimeInfoFromSnapshot(snapshot ContainerSnapsh
 	if info.HostPort == "" {
 		info.HostPort = envdHostPort(snapshot.Configuration.PublishedPorts, r.cfg.EnvdPort)
 	}
-	if info.EnvdURL == "" && info.HostPort != "" {
-		info.EnvdURL = appleEnvdURL(info.HostPort)
+	if info.EnvdURL == "" {
+		info.EnvdURL = appleGuestEnvdURL(snapshot, r.cfg.EnvdPort)
+		if info.EnvdURL == "" && info.HostPort != "" {
+			info.EnvdURL = appleEnvdURL(info.HostPort)
+		}
 	}
 	if len(info.VolumeMounts) == 0 {
 		info.VolumeMounts = appleVolumeMountsFromLabels(labels)
@@ -1168,6 +1190,36 @@ func (r *AppleContainerRuntime) healthCheck(ctx context.Context, envdURL string)
 		return r.checkHealthy(ctx, envdURL)
 	}
 	return r.defaultHealthCheck(ctx, envdURL)
+}
+
+func (r *AppleContainerRuntime) waitHealthyEnvd(ctx context.Context, containerID, hostPort, preferredURL string) (string, error) {
+	primaryURL := strings.TrimSpace(preferredURL)
+	if primaryURL == "" {
+		primaryURL = appleEnvdURL(hostPort)
+	}
+	if primaryURL == "" {
+		return "", fmt.Errorf("missing envd address for apple container %s", containerID)
+	}
+
+	quickCheckCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	primaryErr := r.healthCheck(quickCheckCtx, primaryURL)
+	cancel()
+	if primaryErr == nil {
+		return primaryURL, nil
+	}
+
+	snapshot, snapshotErr := r.containerSnapshot(ctx, containerID)
+	if snapshotErr != nil {
+		return "", primaryErr
+	}
+	guestURL := appleGuestEnvdURL(snapshot, r.cfg.EnvdPort)
+	if guestURL == "" || guestURL == primaryURL {
+		return "", primaryErr
+	}
+	if err := r.healthCheck(ctx, guestURL); err != nil {
+		return "", fmt.Errorf("published envd address %s failed: %w; guest address %s failed: %v", primaryURL, primaryErr, guestURL, err)
+	}
+	return guestURL, nil
 }
 
 func (r *AppleContainerRuntime) defaultHealthCheck(ctx context.Context, envdURL string) error {
