@@ -29,6 +29,7 @@ type SandboxRuntimeCreateRequest struct {
 	CreatedAt           time.Time
 	EndAt               time.Time
 	AllowInternetAccess *bool
+	Network             *NetworkConfig
 }
 
 type SandboxRuntimeInfo struct {

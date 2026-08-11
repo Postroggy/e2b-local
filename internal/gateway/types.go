@@ -1,6 +1,8 @@
 package gateway
 
-import "time"
+import (
+	"time"
+)
 
 type NewSandboxRequest struct {
 	TemplateID          string            `json:"templateID"`
@@ -9,6 +11,7 @@ type NewSandboxRequest struct {
 	Timeout             int               `json:"timeout,omitempty"`
 	Secure              *bool             `json:"secure,omitempty"`
 	AllowInternetAccess *bool             `json:"allow_internet_access,omitempty"`
+	Network             *NetworkConfig    `json:"network,omitempty"`
 	VolumeMounts        []VolumeMount     `json:"volumeMounts,omitempty"`
 }
 
@@ -70,6 +73,11 @@ type VolumeMount struct {
 	MountPath string `json:"mountPath,omitempty"`
 }
 
+type NetworkConfig struct {
+	AllowOut *[]string `json:"allowOut,omitempty"`
+	DenyOut  *[]string `json:"denyOut,omitempty"`
+}
+
 type VolumeResponse struct {
 	VolumeID string `json:"volumeID"`
 	Name     string `json:"name"`
@@ -101,4 +109,5 @@ type SandboxRecord struct {
 	DiskSizeMB          int32
 	MemoryMB            int32
 	AllowInternetAccess *bool
+	Network             *NetworkConfig
 }

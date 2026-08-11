@@ -432,6 +432,7 @@ func (a *App) defaultCreateSandbox(ctx context.Context, req e2bapi.NewSandbox) (
 	metadata := sandboxMetadata(req.Metadata)
 	volumeMounts := sandboxVolumeMounts(req.VolumeMounts)
 	envVars := sandboxEnvVars(req.EnvVars)
+	network := sandboxNetworkConfig(req.Network)
 	timeoutSeconds := requestTimeout(req.Timeout)
 	now := time.Now().UTC()
 	endAt := now.Add(time.Duration(timeoutSeconds) * time.Second)
@@ -445,6 +446,7 @@ func (a *App) defaultCreateSandbox(ctx context.Context, req e2bapi.NewSandbox) (
 		CreatedAt:           now,
 		EndAt:               endAt,
 		AllowInternetAccess: req.AllowInternetAccess,
+		Network:             network,
 	})
 	if err != nil {
 		if errors.Is(err, ErrRuntimeCapacity) {
@@ -2315,6 +2317,16 @@ func sandboxVolumeMounts(volumeMounts *[]e2bapi.SandboxVolumeMount) []VolumeMoun
 		})
 	}
 	return result
+}
+
+func sandboxNetworkConfig(network *e2bapi.SandboxNetworkConfig) *NetworkConfig {
+	if network == nil {
+		return nil
+	}
+	return &NetworkConfig{
+		AllowOut: network.AllowOut,
+		DenyOut:  network.DenyOut,
+	}
 }
 
 func requestTimeout(timeout *int32) int32 {

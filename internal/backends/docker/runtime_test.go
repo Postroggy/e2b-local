@@ -1463,3 +1463,205 @@ func (r *gatedReader) Read(p []byte) (int, error) {
 	r.data = r.data[n:]
 	return n, nil
 }
+
+func TestDockerNetworkCapabilitiesReturnsCapabilitiesWhenDenyOutSet(t *testing.T) {
+	denyOut := []string{"0.0.0.0/0"}
+	allowOut := []string{"example.com"}
+	caps := dockerNetworkCapabilities(&gateway.NetworkConfig{
+		DenyOut:  &denyOut,
+		AllowOut: &allowOut,
+	})
+	if len(caps) != 2 || caps[0] != "NET_ADMIN" || caps[1] != "NET_RAW" {
+		t.Fatalf("expected NET_ADMIN and NET_RAW, got %#v", caps)
+	}
+}
+
+func TestDockerNetworkCapabilitiesReturnsNilWhenDenyOutNil(t *testing.T) {
+	if caps := dockerNetworkCapabilities(nil); caps != nil {
+		t.Fatalf("expected nil capabilities for nil network, got %#v", caps)
+	}
+	if caps := dockerNetworkCapabilities(&gateway.NetworkConfig{}); caps != nil {
+		t.Fatalf("expected nil capabilities for empty network, got %#v", caps)
+	}
+	emptyDeny := []string{}
+	if caps := dockerNetworkCapabilities(&gateway.NetworkConfig{DenyOut: &emptyDeny}); caps != nil {
+		t.Fatalf("expected nil capabilities for empty DenyOut, got %#v", caps)
+	}
+}
+
+func TestBuildNetworkIptablesRulesIncludesBaselineRules(t *testing.T) {
+	denyOut := []string{"0.0.0.0/0"}
+	rules := buildNetworkIptablesRules(&gateway.NetworkConfig{DenyOut: &denyOut})
+	if len(rules) < 4 {
+		t.Fatalf("expected at least 4 baseline rules (loopback, established, dns, default), got %#v", rules)
+	}
+	// Check baseline rules
+	baselines := []string{
+		"-A OUTPUT -o lo -j ACCEPT",
+		"-A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT",
+		"-A OUTPUT -p udp --dport 53 -j ACCEPT",
+		"-A OUTPUT -j DROP",
+	}
+	for _, baseline := range baselines {
+		found := false
+		for _, rule := range rules {
+			if rule == baseline {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing baseline rule: %s; all rules: %#v", baseline, rules)
+		}
+	}
+}
+
+func TestBuildNetworkIptablesRulesIncludesAllowOutAndDenyOut(t *testing.T) {
+	allowOut := []string{"example.com", "*.example.com", "8.8.8.8"}
+	denyOut := []string{"0.0.0.0/0"}
+	rules := buildNetworkIptablesRules(&gateway.NetworkConfig{
+		AllowOut: &allowOut,
+		DenyOut:  &denyOut,
+	})
+
+	// Check allow rules
+	allowChecks := []string{
+		"-A OUTPUT -d example.com -j ACCEPT",
+		"-A OUTPUT -d *.example.com -j ACCEPT",
+		"-A OUTPUT -d 8.8.8.8 -j ACCEPT",
+	}
+	for _, check := range allowChecks {
+		found := false
+		for _, rule := range rules {
+			if rule == check {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing allow rule: %s", check)
+		}
+	}
+
+	// Check deny rule (DNAT), not DROP
+	denyFound := false
+	for _, rule := range rules {
+		if rule == "-A OUTPUT -d 0.0.0.0/0 -j DROP" {
+			denyFound = true
+			break
+		}
+	}
+	if !denyFound {
+		t.Fatalf("missing deny all rule 0.0.0.0/0; rules: %#v", rules)
+	}
+}
+
+func TestBuildNetworkIptablesRulesSkipsEmptyHost(t *testing.T) {
+	allowOut := []string{"example.com", "", "good.org"}
+	denyOut := []string{"10.0.0.0/8"}
+	rules := buildNetworkIptablesRules(&gateway.NetworkConfig{
+		AllowOut: &allowOut,
+		DenyOut:  &denyOut,
+	})
+
+	// Count ACCEPT rules (should be 3 baseline + 2 non-empty allows)
+	acceptCount := 0
+	for _, rule := range rules {
+		if strings.Contains(rule, "-j ACCEPT") {
+			acceptCount++
+		}
+	}
+	if acceptCount != 5 {
+		t.Fatalf("expected 5 ACCEPT rules (3 baseline + 2 allow), got %d; rules: %#v", acceptCount, rules)
+	}
+
+	// Ensure no empty-d host rule
+	for _, rule := range rules {
+		if strings.Contains(rule, "-d  -j") {
+			t.Fatalf("unexpected empty host rule: %s", rule)
+		}
+	}
+}
+
+func TestDockerNetworkFromLabelsRoundTrips(t *testing.T) {
+	denyOut := []string{"0.0.0.0/0"}
+	allowOut := []string{"example.com"}
+	original := &gateway.NetworkConfig{
+		AllowOut: &allowOut,
+		DenyOut:  &denyOut,
+	}
+
+	labels := map[string]string{
+		dockerLocalSandboxNetworkLabel: dockerJSONLabel(original),
+	}
+
+	restored := dockerNetworkFromLabels(labels)
+	if restored == nil {
+		t.Fatal("expected non-nil restored network")
+	}
+	if len(*restored.DenyOut) != 1 || (*restored.DenyOut)[0] != "0.0.0.0/0" {
+		t.Fatalf("unexpected restored DenyOut: %#v", *restored.DenyOut)
+	}
+	if len(*restored.AllowOut) != 1 || (*restored.AllowOut)[0] != "example.com" {
+		t.Fatalf("unexpected restored AllowOut: %#v", *restored.AllowOut)
+	}
+}
+
+func TestDockerNetworkFromLabelsReturnsNilForEmpty(t *testing.T) {
+	if n := dockerNetworkFromLabels(nil); n != nil {
+		t.Fatalf("expected nil for nil labels, got %#v", n)
+	}
+	if n := dockerNetworkFromLabels(map[string]string{}); n != nil {
+		t.Fatalf("expected nil for empty labels, got %#v", n)
+	}
+	labels := map[string]string{dockerLocalSandboxNetworkLabel: ""}
+	if n := dockerNetworkFromLabels(labels); n != nil {
+		t.Fatalf("expected nil for empty label value, got %#v", n)
+	}
+	labels2 := map[string]string{dockerLocalSandboxNetworkLabel: "invalid json"}
+	if n := dockerNetworkFromLabels(labels2); n != nil {
+		t.Fatalf("expected nil for invalid JSON, got %#v", n)
+	}
+}
+
+func TestDockerSandboxLabelsStoresNetworkConfig(t *testing.T) {
+	denyOut := []string{"0.0.0.0/0"}
+	allowOut := []string{"example.com"}
+	network := &gateway.NetworkConfig{
+		AllowOut: &allowOut,
+		DenyOut:  &denyOut,
+	}
+
+	labels := dockerSandboxLabels(SandboxRuntimeCreateRequest{
+		SandboxID:  "sbx_network",
+		TemplateID: "base",
+		Network:    network,
+	}, "base", "example/base:latest")
+
+	networkLabel, ok := labels[dockerLocalSandboxNetworkLabel]
+	if !ok {
+		t.Fatalf("expected network label in sandbox labels")
+	}
+
+	var decoded gateway.NetworkConfig
+	if err := json.Unmarshal([]byte(networkLabel), &decoded); err != nil {
+		t.Fatalf("unmarshal network label: %v", err)
+	}
+	if len(*decoded.DenyOut) != 1 || (*decoded.DenyOut)[0] != "0.0.0.0/0" {
+		t.Fatalf("unexpected DenyOut in label: %#v", *decoded.DenyOut)
+	}
+	if len(*decoded.AllowOut) != 1 || (*decoded.AllowOut)[0] != "example.com" {
+		t.Fatalf("unexpected AllowOut in label: %#v", *decoded.AllowOut)
+	}
+}
+
+func TestDockerSandboxLabelsOmitsNetworkWhenNil(t *testing.T) {
+	labels := dockerSandboxLabels(SandboxRuntimeCreateRequest{
+		SandboxID:  "sbx_no_network",
+		TemplateID: "base",
+	}, "base", "example/base:latest")
+
+	if _, ok := labels[dockerLocalSandboxNetworkLabel]; ok {
+		t.Fatalf("expected no network label when Network is nil")
+	}
+}

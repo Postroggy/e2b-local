@@ -77,6 +77,7 @@ const (
 	dockerLocalSandboxEndAtLabel          = "e2b.local.sandbox.end_at"
 	dockerLocalSandboxMetadataLabel       = "e2b.local.sandbox.metadata"
 	dockerLocalSandboxAllowInternetLabel  = "e2b.local.sandbox.allow_internet_access"
+	dockerLocalSandboxNetworkLabel        = "e2b.local.sandbox.network"
 	dockerLocalSandboxVolumeMountsLabel   = "e2b.local.sandbox.volume_mounts"
 	dockerLocalVolumeMetadataFile         = ".e2b-local-volume.json"
 	dockerLocalTemplateLabel              = "e2b.local.template"
@@ -231,6 +232,7 @@ func (r *DockerRuntime) CreateSandbox(ctx context.Context, req SandboxRuntimeCre
 	envdPort := dockerEnvdNatPort()
 	exposedPorts := dockerExposedPorts(envdPort, publishedPorts)
 	portBindings := dockerPortBindings(envdPort, publishedPorts, r.cfg.PublishedHostIP)
+	capAdd := dockerNetworkCapabilities(req.Network)
 	containerName := r.cfg.ContainerNamePrefix + req.SandboxID
 	initEnabled := true
 	// 持有读锁直到 Docker 登记完挂载，避免删除操作在目录解析后、容器创建前移除卷。
@@ -258,6 +260,7 @@ func (r *DockerRuntime) CreateSandbox(ctx context.Context, req SandboxRuntimeCre
 			Init:         &initEnabled,
 			PortBindings: portBindings,
 			Mounts:       mounts,
+			CapAdd:       capAdd,
 		},
 		&network.NetworkingConfig{},
 		containerCreatePlatform(selectedPlatform),
@@ -301,6 +304,11 @@ func (r *DockerRuntime) CreateSandbox(ctx context.Context, req SandboxRuntimeCre
 		if logs != "" {
 			return SandboxRuntimeInfo{}, fmt.Errorf("%w; container logs:\n%s", err, logs)
 		}
+		return SandboxRuntimeInfo{}, err
+	}
+
+	if err := r.applyNetworkRules(ctx, resp.ID, req.Network); err != nil {
+		_ = r.removeContainer(context.Background(), resp.ID)
 		return SandboxRuntimeInfo{}, err
 	}
 
@@ -509,6 +517,7 @@ func (r *DockerRuntime) restoreSandboxRecord(ctx context.Context, summary docker
 		EndAt:               endAt,
 		State:               state,
 		AllowInternetAccess: dockerBoolPtrLabel(labels[dockerLocalSandboxAllowInternetLabel]),
+		Network:             dockerNetworkFromLabels(labels),
 	}, true, nil
 }
 
@@ -1261,6 +1270,9 @@ func dockerSandboxLabels(req SandboxRuntimeCreateRequest, templateID string, ima
 	if req.AllowInternetAccess != nil {
 		labels[dockerLocalSandboxAllowInternetLabel] = strconv.FormatBool(*req.AllowInternetAccess)
 	}
+	if req.Network != nil {
+		labels[dockerLocalSandboxNetworkLabel] = dockerJSONLabel(req.Network)
+	}
 	for key, value := range labels {
 		if strings.TrimSpace(value) == "" {
 			delete(labels, key)
@@ -1324,6 +1336,18 @@ func dockerBoolPtrLabel(value string) *bool {
 		return nil
 	}
 	return &parsed
+}
+
+func dockerNetworkFromLabels(labels map[string]string) *gateway.NetworkConfig {
+	value := strings.TrimSpace(labels[dockerLocalSandboxNetworkLabel])
+	if value == "" {
+		return nil
+	}
+	var network gateway.NetworkConfig
+	if err := json.Unmarshal([]byte(value), &network); err != nil {
+		return nil
+	}
+	return &network
 }
 
 func dockerVolumeMountsFromLabels(labels map[string]string) []VolumeMount {
@@ -1990,6 +2014,85 @@ func dockerContainerIP(settings *dockertypes.NetworkSettings) string {
 		}
 	}
 	return ""
+}
+
+func dockerNetworkCapabilities(network *gateway.NetworkConfig) []string {
+	if network == nil || network.DenyOut == nil || len(*network.DenyOut) == 0 {
+		return nil
+	}
+	return []string{"NET_ADMIN", "NET_RAW"}
+}
+
+func (r *DockerRuntime) applyNetworkRules(ctx context.Context, containerID string, network *gateway.NetworkConfig) error {
+	if network == nil || network.DenyOut == nil || len(*network.DenyOut) == 0 {
+		return nil
+	}
+	// iptables rules for network isolation
+	rules := buildNetworkIptablesRules(network)
+	for _, rule := range rules {
+		if err := r.execIptables(ctx, containerID, rule); err != nil {
+			return fmt.Errorf("apply iptables rule: %s: %w", rule, err)
+		}
+	}
+	return nil
+}
+
+func buildNetworkIptablesRules(network *gateway.NetworkConfig) []string {
+	rules := []string{
+		// Allow loopback traffic
+		"-A OUTPUT -o lo -j ACCEPT",
+		// Allow established connections
+		"-A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT",
+		// Allow DNS resolution
+		"-A OUTPUT -p udp --dport 53 -j ACCEPT",
+	}
+	// Allow outbound to allowed hosts
+	if network.AllowOut != nil {
+		for _, host := range *network.AllowOut {
+			if strings.TrimSpace(host) == "" {
+				continue
+			}
+			rules = append(rules, fmt.Sprintf("-A OUTPUT -d %s -j ACCEPT", strings.TrimSpace(host)))
+		}
+	}
+	// Deny outbound to denied destinations
+	for _, cidr := range *network.DenyOut {
+		if strings.TrimSpace(cidr) == "" {
+			continue
+		}
+		rules = append(rules, fmt.Sprintf("-A OUTPUT -d %s -j DROP", strings.TrimSpace(cidr)))
+	}
+	// Default: drop all other outbound traffic when DenyOut is set
+	rules = append(rules, "-A OUTPUT -j DROP")
+	return rules
+}
+
+func (r *DockerRuntime) execIptables(ctx context.Context, containerID string, rule string) error {
+	exec, err := r.client.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		AttachStderr: true,
+		AttachStdout: true,
+		Cmd:          []string{"iptables", rule},
+	})
+	if err != nil {
+		return fmt.Errorf("create iptables exec: %w", err)
+	}
+	attached, err := r.client.ContainerExecAttach(ctx, exec.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return fmt.Errorf("attach iptables exec: %w", err)
+	}
+	defer attached.Close()
+	var stdout, stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, attached.Reader); err != nil {
+		return fmt.Errorf("read iptables output: %w", err)
+	}
+	inspect, err := r.client.ContainerExecInspect(ctx, exec.ID)
+	if err != nil {
+		return fmt.Errorf("inspect iptables exec: %w", err)
+	}
+	if inspect.ExitCode != 0 {
+		return fmt.Errorf("iptables %s failed: exit %d stderr=%q", rule, inspect.ExitCode, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 func (r *DockerRuntime) waitHealthy(ctx context.Context, envdURL string) error {
